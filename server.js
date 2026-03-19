@@ -387,7 +387,7 @@ For help: support@routeride.kw`;
 // ─── ROUTES: HEALTH ──────────────────────────────────────────
 // ============================================================
 app.get('/', (_req, res) => res.json({
- service: 'captain-tours-travels API's are Active',
+ service: 'captain-tours-travels API are Active',
  version: '1.0.0',
  status: 'running',
  time: new Date().toISOString(),
