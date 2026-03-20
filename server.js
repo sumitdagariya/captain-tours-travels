@@ -11,7 +11,7 @@
 //      .env               
 //      package.json
 //← encryption helper (below)
-//← environment variables
+environment variables
 // ============================================================
 'use strict';
 require('dotenv').config();
