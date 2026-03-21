@@ -6,12 +6,12 @@
 //  File structure expected:
 //    /routeride-backend
 //      server.js          
-← this file
+//← this file
 //      hesabeCrypt.js     
 //      .env               
 //      package.json
-← encryption helper (below)
-← environment variables
+//← encryption helper (below)
+//← environment variables
 // ============================================================
 'use strict';
 require('dotenv').config();
