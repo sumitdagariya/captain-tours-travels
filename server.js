@@ -6,17 +6,15 @@
 //  File structure expected:
 //    /routeride-backend
 //      server.js          
-//      ← this file
+← this file
 //      hesabeCrypt.js     
 //      .env               
 //      package.json
-//      ← encryption helper (below)
-//      ← environment variables
+← encryption helper (below)
+← environment variables
 // ============================================================
 'use strict';
-console.log(process.env);
 require('dotenv').config();
-console.log(process.env);
 const express       = require('express');
 const cors          = require('cors');
 const helmet        = require('helmet');
@@ -33,45 +31,6 @@ const HesabeCrypt   = require('./hesabeCrypt');
 // ─── App init ────────────────────────────────────────────────
 const app  = express();
 const PORT = process.env.PORT || 3000;
-// ── Startup: validate critical environment variables ──────────
-// If APP_URL is wrong, Hesabe callbacks go to "Not Found".
-// Check Railway → Variables and set these correctly.
-(function validateEnv() {
-  const missing = [];
-  ['DATABASE_URL', 'JWT_SECRET'].forEach(k => {
-    if (!process.env[k]) missing.push(k);
-  });
-  if (missing.length) {
-  }
-    console.error(' FATAL: Missing env vars:', missing.join(', '));
-    process.exit(1);
-  const APP_URL = (process.env.APP_URL || '').trim();
-  if (!APP_URL) {
-    console.error(
-      ' CRITICAL: APP_URL is not set in Railway environment variables!\n' +
-      '   Hesabe will redirect to undefined/null which causes "Not Found".\n' +
-      '   Fix: Railway Dashboard → Your Project → Variables → Add APP_URL\n' +
-      '   Value: https://captain-tours-travels-production.up.railway.app'
-    );
-  } else if (APP_URL.includes('your-api.railway.app')) {
-    console.error(
-      ' CRITICAL: APP_URL is still the placeholder "your-api.railway.app"!\n' +
-      '   This is NOT a real domain. Hesabe callbacks will show "Not Found".\n' +
-      '   Fix: Railway Dashboard → Variables → APP_URL → paste your real URL.\n' +
-      '   Your real Railway URL looks like: https://routeride-production.up.railway.app'
-    );
-  } else {
-    console.log(' APP_URL:', APP_URL);
-  }
-  const FRONTEND_URL = (process.env.FRONTEND_URL || '').trim();
-  if (!FRONTEND_URL) {
-    console.warn('  FRONTEND_URL not set — payment redirects will fail');
-  } else if (FRONTEND_URL.includes('your-frontend.vercel.app')) {
-    console.warn('  FRONTEND_URL is still the placeholder — update it in Railway Variables');
-  } else {
-    console.log(' FRONTEND_URL:', FRONTEND_URL);
-  }
-})();
 // ─── Database (PostgreSQL via Supabase / Railway) ─────────────
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -677,39 +636,20 @@ app.post('/api/bookings/create', async (req, res) => {
     // Insert passengers
     const seatMap = {};
     seatsResult.rows.forEach(s => { seatMap[s.seat_number] = s.id; });
-    // Helper: safely trim and cap string length to avoid VARCHAR overflow
-    const safe = (val, maxLen) =>
-      val ? String(val).trim().substring(0, maxLen) : null;
     for (let i = 0; i < passengerData.length; i++) {
       const p    = passengerData[i];
       const sNum = seat_numbers[i];
-      // Sanitise every text field against its column size in DB
-      // (after migration: nationality=100, phone=30, first_name=100, last_name=100)
-      const firstName   = safe(p.first_name,   100);
-      const lastName    = safe(p.last_name,     100);
-      const nationality = safe(p.nationality,   100); // was VARCHAR(5) → now 100
-      const idNumber    = safe(p.id_number,      60);
-      const phone       = safe(p.phone,           30);
-      const email       = safe(p.email,          200);
-      const age         = p.age ? parseInt(p.age, 10) || null : null;
-      const gender      = p.gender || null;
-      if (!firstName) {
-        throw new Error(`Passenger ${i + 1}: first_name is required`);
-      }
       await client.query(
         `INSERT INTO passengers
            (booking_id, seat_id, is_primary, first_name, last_name,
-            age, gender, phone, email, nationality, id_number)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [
-          booking.id, seatMap[sNum], i === 0,
-          firstName, lastName,
-          age, gender,
-          i === 0 ? phone : null,
-          i === 0 ? email : null,
-          nationality,
-          idNumber,
-        ]
+            age, gender, phone, email, nationality)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [booking.id, seatMap[sNum], i === 0,
+         p.first_name, p.last_name || null,
+         p.age || null, p.gender || null,
+         i === 0 ? p.phone : null,
+         i === 0 ? p.email : null,
+         p.nationality || null]
       );
     }
     await client.query('COMMIT');
@@ -828,108 +768,79 @@ app.post('/api/payments/hesabe/initiate', async (req, res) => {
   }
 });
 // Step 2: Success callback — Hesabe redirects here after payment
-// Handles both GET and POST (Hesabe may use either)
-async function handleHesabeSuccess(req, res) {
-  const FRONTEND = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+// GET /api/payments/hesabe/success?data=ENCRYPTED
+app.get('/api/payments/hesabe/success', async (req, res) => {
   let bookingRef = null;
-  if (!FRONTEND) {
-    console.error(' FRONTEND_URL not set — cannot redirect passenger after success');
-    return res.status(500).send(
-      'Server configuration error: FRONTEND_URL not set. ' +
-      'Your payment MAY have been processed. Please contact support with your booking reference.'
-    );
-  }
   try {
-    const raw = req.query.data || req.body?.data;
-    if (!raw) {
-      console.warn('Hesabe success callback called with no data param');
-      return res.redirect(302, `${FRONTEND}?payment-failed=1&reason=no_data`);
-    }
-    const decrypted = hesabeCrypt.decrypt(decodeURIComponent(raw));
-    const { resultCode, amount, paymentId, paymentToken, orderReferenceNumber, variable1, method } = decrypted;
-    bookingRef      = variable1 || orderReferenceNumber;
-    const isSuccess = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(resultCode);
-    console.log(` Hesabe success callback: ref=${bookingRef} code=${resultCode} amount=${amount}`);
-    // Log to DB (don't throw if this fails)
+    const { data } = req.query;
+    if (!data) return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
+    // Decrypt the response
+    const decrypted = hesabeCrypt.decrypt(decodeURIComponent(data));
+    const {
+      resultCode,
+      amount,
+      paymentId,
+      paymentToken,
+      paidOn,
+      orderReferenceNumber,
+      variable1,
+      variable2,
+      method,
+    } = decrypted;
+    bookingRef            = variable1 || orderReferenceNumber;
+    const isSuccess       = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(resultCode);
+    // Log the raw response
     await db.query(
       `INSERT INTO payment_webhook_log
          (booking_ref, raw_payload, decrypted_data, result_code, payment_id, amount, processed)
        VALUES ($1,$2,$3::JSONB,$4,$5,$6,$7)`,
-      [bookingRef, raw, JSON.stringify(decrypted), resultCode, paymentId, amount, isSuccess]
-    ).catch(e => console.error('Log failed:', e.message));
+      [bookingRef, data, JSON.stringify(decrypted), resultCode, paymentId, amount, isSuccess]
+    );
     if (isSuccess) {
       await confirmPayment(bookingRef, paymentId, paymentToken, resultCode, method, amount);
-      const successUrl = `${FRONTEND}?booking-confirmed=1&ref=${encodeURIComponent(bookingRef)}&paid=${amount}&method=${method || ''}`;
-      console.log(` Payment confirmed, redirecting to: ${successUrl}`);
-      return res.redirect(302, successUrl);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/booking-confirmed?ref=${bookingRef}&paid=${amount}&method=${method || ''}`
+      );
     } else {
       await db.query(
         `UPDATE bookings SET payment_status='FAILED', updated_at=NOW() WHERE booking_ref=$1`,
         [bookingRef]
-      ).catch(() => {});
-      const failUrl = `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}&reason=${resultCode}`;
-      return res.redirect(302, failUrl);
+      );
+      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed?ref=${bookingRef}&reason=${resultCode}`);
     }
   } catch (err) {
     console.error('Hesabe success callback error:', err.message);
-    const failUrl = bookingRef
-      ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}`
-      : `${FRONTEND}?payment-failed=1`;
-    return res.redirect(302, failUrl);
+    const dest = bookingRef
+      ? `${process.env.FRONTEND_URL}/payment-failed?ref=${bookingRef}`
+      : `${process.env.FRONTEND_URL}/payment-failed`;
+    return res.redirect(dest);
   }
-}
-app.get('/api/payments/hesabe/success',  handleHesabeSuccess);
-app.post('/api/payments/hesabe/success', handleHesabeSuccess);
+});
 // Step 3: Failure callback
-// Hesabe may call this as GET or POST — handle both
-// URL: /api/payments/hesabe/failure?data=ENCRYPTED
-async function handleHesabeFailure(req, res) {
-  const FRONTEND = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+// GET /api/payments/hesabe/failure?data=ENCRYPTED
+app.get('/api/payments/hesabe/failure', async (req, res) => {
   let bookingRef = null;
-  // Safety: if FRONTEND_URL is not set, log clearly
-  if (!FRONTEND) {
-    console.error(' FRONTEND_URL is not set — cannot redirect passenger after failure');
-    return res.status(500).send(
-      'Payment gateway callback error: FRONTEND_URL not configured on server. ' +
-      'Please contact support. Your payment was NOT charged.'
-    );
-  }
   try {
-    // data may arrive in query string (GET) or request body (POST)
-    const raw = req.query.data || req.body?.data;
-    if (raw) {
-      const decrypted = hesabeCrypt.decrypt(decodeURIComponent(raw));
-      bookingRef = decrypted.variable1 || decrypted.orderReferenceNumber;
-      console.log(` Hesabe failure: ref=${bookingRef} code=${decrypted.resultCode}`);
-      // Log to DB
-      await db.query(
-        `INSERT INTO payment_webhook_log
-           (booking_ref, raw_payload, decrypted_data, result_code, processed)
-         VALUES ($1,$2,$3::JSONB,$4,FALSE)
-         ON CONFLICT DO NOTHING`,
-        [bookingRef, raw, JSON.stringify(decrypted), decrypted.resultCode || 'FAILED']
-      ).catch(() => {}); // don't throw if log fails
+    const { data } = req.query;
+    if (data) {
+      const decrypted = hesabeCrypt.decrypt(decodeURIComponent(data));
+      bookingRef      = decrypted.variable1 || decrypted.orderReferenceNumber;
       if (bookingRef) {
         await db.query(
-          `UPDATE bookings
-           SET payment_status = 'FAILED', updated_at = NOW()
-           WHERE booking_ref = $1 AND payment_status = 'PENDING'`,
+          `UPDATE bookings SET payment_status='FAILED', updated_at=NOW() WHERE booking_ref=$1`,
           [bookingRef]
-        ).catch(() => {});
+        );
       }
     }
   } catch (err) {
-    console.error('Failure callback decrypt error:', err.message);
+    console.error('Failure callback error:', err.message);
   }
-  // Redirect passenger back to frontend failure page
-  const redirectTo = bookingRef
-    ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}`
-    : `${FRONTEND}?payment-failed=1`;
-  console.log(`  Redirecting to: ${redirectTo}`);
-  return res.redirect(302, redirectTo);
-}
-app.get('/api/payments/hesabe/failure',  handleHesabeFailure);
-app.post('/api/payments/hesabe/failure', handleHesabeFailure);
+  res.redirect(
+    bookingRef
+      ? `${process.env.FRONTEND_URL}/payment-failed?ref=${bookingRef}`
+      : `${process.env.FRONTEND_URL}/payment-failed`
+  );
+});
 // Step 4: Webhook — server-to-server from Hesabe (most reliable)
 // POST /api/payments/hesabe/webhook
 app.post('/api/payments/hesabe/webhook', async (req, res) => {
