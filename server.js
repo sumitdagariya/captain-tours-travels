@@ -14,7 +14,9 @@
 //      ← environment variables
 // ============================================================
 'use strict';
-//require('dotenv').config();
+console.log(process.env);
+require('dotenv').config();
+console.log(process.env);
 const express       = require('express');
 const cors          = require('cors');
 const helmet        = require('helmet');
@@ -49,7 +51,7 @@ const PORT = process.env.PORT || 3000;
       ' CRITICAL: APP_URL is not set in Railway environment variables!\n' +
       '   Hesabe will redirect to undefined/null which causes "Not Found".\n' +
       '   Fix: Railway Dashboard → Your Project → Variables → Add APP_URL\n' +
-      '   Value: https://YOUR-REAL-APP-NAME.up.railway.app'
+      '   Value: https://captain-tours-travels-production.up.railway.app'
     );
   } else if (APP_URL.includes('your-api.railway.app')) {
     console.error(
