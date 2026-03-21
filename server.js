@@ -14,11 +14,6 @@
 //      ← environment variables
 // ============================================================
 'use strict';
-const missing = required.filter(v => !process.env[v]);
-if (missing.length) {
-  console.error("Missing env vars:", missing);
-  process.exit(1);
-}
 console.log(process.env);
 require('dotenv').config();
 console.log(process.env);
