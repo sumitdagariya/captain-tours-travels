@@ -13,8 +13,15 @@
 //← encryption helper (below)
 //← environment variables
 // ============================================================
+
+
 'use strict';
 require('dotenv').config();
+var { SendMailClient } = require("zeptomail");
+const url = "https://api.zeptomail.in/v1.1/email";
+const token = "Zoho-enczapikey PHtE6r0ER73pjWEspxNW4PO+FpH1MoIp9b5hLQlCt9xCCvUHTk0A/Yorx2O2/0x8V6VCEP/Owd1r4L3IuuPRJ2/oPWcYWWqyqK3sx/VYSPOZsbq6x00as1kTc03cU4TrdtNr0ybQud7cNA==";
+let client = new SendMailClient({url, token});
+
 const express       = require('express');
 const cors          = require('cors');
 const helmet        = require('helmet');
@@ -278,6 +285,25 @@ async function sendTicketEmail(booking) {
       subject: ` Booking Confirmed — ${booking.booking_ref} | ${booking.origin_city} → ${booking.destination_city}`,
       html,
     });
+	await client.sendMail({
+    "from":
+    {
+        "address": "noreply@captainairtravel.com",
+        "name": "noreply"
+    },
+    "to":
+    [
+        {
+        "email_address":
+            {
+                "address": "sumitdagariya@gmail.com",
+                "name": "Sumit"
+            }
+        }
+    ],
+    "subject": "Test Email",
+    "htmlbody": "<div><b> Test email sent successfully.</b></div>",
+}).then((resp) => console.log("success")).catch((error) => console.log("error"));
     await db.query(
       `INSERT INTO notification_log
          (booking_id, recipient_email, type, template_name, status)
