@@ -768,7 +768,7 @@ app.post('/api/payments/hesabe/initiate', async (req, res) => {
   }
 });
 // Step 2: Success callback — Hesabe redirects here after payment
-/ Handles both GET and POST (Hesabe may use either)
+// Handles both GET and POST (Hesabe may use either)
 async function handleHesabeSuccess(req, res) {
   const FRONTEND = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
   let bookingRef = null;
