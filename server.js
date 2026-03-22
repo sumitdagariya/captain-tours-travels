@@ -1247,8 +1247,9 @@ app.get('/api/admin/schedules', requireAdmin, async (req, res) => {
        LEFT JOIN seats st ON st.schedule_id = s.id
        GROUP BY s.id, b.operator_name, b.bus_type, r.origin_city, r.destination_city
        ORDER BY s.departure_time DESC
+	   LIMIT 100`
     );
-       LIMIT 100`
+       
     res.json({ success: true, schedules: result.rows });
   } catch (err) { sendError(res, 500, 'Could not fetch schedules', err.message); }
 });
