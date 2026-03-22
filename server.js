@@ -1030,6 +1030,7 @@ app.post('/api/payments/hesabe/success', handleHesabeSuccess);
 async function handleHesabeFailure(req, res) {
   const FRONTEND = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
   let bookingRef = null;
+  let variable1 = null;
   if (!FRONTEND) {
     console.error(' FRONTEND_URL is not set — cannot redirect passenger after failure');
     return res.status(500).send(
@@ -1044,6 +1045,7 @@ async function handleHesabeFailure(req, res) {
       if (payload) {
         const resultCode = payload.resultCode || payload.result_code || 'FAILED';
         bookingRef = payload.variable1 || payload.orderReferenceNumber || payload.order_reference_number;
+		variable1 = payload.variable1
         console.log(` Hesabe failure: ref=${bookingRef} code=${resultCode}`);
         await db.query(
           `INSERT INTO payment_webhook_log
@@ -1069,7 +1071,7 @@ async function handleHesabeFailure(req, res) {
   } catch (err) {
     console.error('Failure callback error:', err.message);
   }
-  const redirectTo = payload.variable1
+  const redirectTo = variable1
     ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}`
     : `${FRONTEND}?payment-failed=1`;
   console.log(`  Redirecting to: ${redirectTo}`);
