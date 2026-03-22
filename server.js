@@ -1027,7 +1027,7 @@ async function handleHesabeFailure(req, res) {
       const payload = decryptHesabeCallback(raw);
       if (payload) {
         const resultCode = payload.resultCode || payload.result_code || 'FAILED';
-        bookingRef = payload.variable1 || payload.variable1 || payload.order_reference_number;
+        bookingRef = payload.variable1 || payload.variable1 || payload.variable1;
         console.log(` Hesabe failure: ref=${bookingRef} code=${resultCode}`);
         await db.query(
           `INSERT INTO payment_webhook_log
