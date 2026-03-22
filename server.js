@@ -862,15 +862,26 @@ app.post('/api/payments/hesabe/initiate', async (req, res) => {
         timeout: 15000,
       }
     );
-    // Decrypt Hesabe's response
-    const rawResponse     = response.data?.response || response.data;
-    const decryptedResponse = hesabeCrypt.decrypt(
-      typeof rawResponse === 'string' ? rawResponse : JSON.stringify(rawResponse)
-    );
-    if (!decryptedResponse?.response?.data)
-      throw new Error('Invalid response from Hesabe checkout');
-    const paymentToken  = decryptedResponse.response.data;
-    const redirectUrl   = `${HESABE_PAYMENT_URL}?data=${paymentToken}`;
+    // Decrypt Hesabe's checkout response
+    // Hesabe checkout API returns: { response: "hex_encrypted_string" }
+    // The hex string decrypts to: { status, code, response: { data: "payment_token" } }
+    const encryptedHex = response.data?.response;
+    if (!encryptedHex || typeof encryptedHex !== 'string') {
+      console.error('Hesabe checkout raw response:', JSON.stringify(response.data));
+      throw new Error('Hesabe checkout returned unexpected structure — no response field');
+    }
+    const decryptedCheckout = hesabeCrypt.decrypt(encryptedHex);
+    console.log('Hesabe checkout decrypted:', JSON.stringify(decryptedCheckout, null, 2));
+    // The payment token to redirect user to Hesabe payment page
+    // It lives in decryptedCheckout.response.data (string token)
+    const paymentToken =
+      decryptedCheckout?.response?.data ||   // standard shape
+      decryptedCheckout?.data           ||   // fallback
+      decryptedCheckout?.response;           // last resort
+    if (!paymentToken || typeof paymentToken !== 'string') {
+      throw new Error('Could not extract payment token from Hesabe checkout response');
+    }
+    const redirectUrl = `${HESABE_PAYMENT_URL}?data=${paymentToken}`;
     // Save the payment token against the booking
     await db.query(
       `UPDATE bookings
@@ -1030,7 +1041,6 @@ app.post('/api/payments/hesabe/success', handleHesabeSuccess);
 async function handleHesabeFailure(req, res) {
   const FRONTEND = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
   let bookingRef = null;
-  let variable1 = null;
   if (!FRONTEND) {
     console.error(' FRONTEND_URL is not set — cannot redirect passenger after failure');
     return res.status(500).send(
@@ -1045,7 +1055,6 @@ async function handleHesabeFailure(req, res) {
       if (payload) {
         const resultCode = payload.resultCode || payload.result_code || 'FAILED';
         bookingRef = payload.variable1 || payload.orderReferenceNumber || payload.order_reference_number;
-		variable1 = payload.variable1
         console.log(` Hesabe failure: ref=${bookingRef} code=${resultCode}`);
         await db.query(
           `INSERT INTO payment_webhook_log
@@ -1071,8 +1080,8 @@ async function handleHesabeFailure(req, res) {
   } catch (err) {
     console.error('Failure callback error:', err.message);
   }
-  const redirectTo = variable1
-    ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(variable1)}`
+  const redirectTo = bookingRef
+    ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}`
     : `${FRONTEND}?payment-failed=1`;
   console.log(`  Redirecting to: ${redirectTo}`);
   return res.redirect(302, redirectTo);
