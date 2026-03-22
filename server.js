@@ -13,8 +13,6 @@
 //← encryption helper (below)
 //← environment variables
 // ============================================================
-
-
 'use strict';
 require('dotenv').config();
 var { SendMailClient } = require("zeptomail");
@@ -38,6 +36,45 @@ const HesabeCrypt   = require('./hesabeCrypt');
 // ─── App init ────────────────────────────────────────────────
 const app  = express();
 const PORT = process.env.PORT || 3000;
+// ── Startup: validate critical environment variables ──────────
+// If APP_URL is wrong, Hesabe callbacks go to "Not Found".
+// Check Railway → Variables and set these correctly.
+(function validateEnv() {
+  const missing = [];
+  ['DATABASE_URL', 'JWT_SECRET'].forEach(k => {
+    if (!process.env[k]) missing.push(k);
+  });
+  if (missing.length) {
+  }
+    console.error(' FATAL: Missing env vars:', missing.join(', '));
+    process.exit(1);
+  const APP_URL = (process.env.APP_URL || '').trim();
+  if (!APP_URL) {
+    console.error(
+      ' CRITICAL: APP_URL is not set in Railway environment variables!\n' +
+      '   Hesabe will redirect to undefined/null which causes "Not Found".\n' +
+      '   Fix: Railway Dashboard → Your Project → Variables → Add APP_URL\n' +
+      '   Value: https://YOUR-REAL-APP-NAME.up.railway.app'
+    );
+  } else if (APP_URL.includes('your-api.railway.app')) {
+    console.error(
+      ' CRITICAL: APP_URL is still the placeholder "your-api.railway.app"!\n' +
+      '   This is NOT a real domain. Hesabe callbacks will show "Not Found".\n' +
+      '   Fix: Railway Dashboard → Variables → APP_URL → paste your real URL.\n' +
+      '   Your real Railway URL looks like: https://routeride-production.up.railway.app'
+    );
+  } else {
+    console.log(' APP_URL:', APP_URL);
+  }
+  const FRONTEND_URL = (process.env.FRONTEND_URL || '').trim();
+  if (!FRONTEND_URL) {
+    console.warn('  FRONTEND_URL not set — payment redirects will fail');
+  } else if (FRONTEND_URL.includes('your-frontend.vercel.app')) {
+    console.warn('  FRONTEND_URL is still the placeholder — update it in Railway Variables');
+  } else {
+    console.log(' FRONTEND_URL:', FRONTEND_URL);
+  }
+})();
 // ─── Database (PostgreSQL via Supabase / Railway) ─────────────
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -429,6 +466,45 @@ app.get('/health', async (_req, res) => {
   try { await redis.ping(); redisOk = true; } catch {}
   res.json({ db: dbOk, redis: redisOk, uptime: process.uptime() });
 });
+// ── Debug: verify Hesabe keys are correct (remove in production) ──
+// GET /api/debug/hesabe-keys  → shows key lengths without exposing values
+app.get('/api/debug/hesabe-keys', (req, res) => {
+  const secretKey = process.env.HESABE_SECRET_KEY || '';
+  const ivKey     = process.env.HESABE_IV_KEY     || '';
+  const merchant  = process.env.HESABE_MERCHANT_CODE || '';
+  const access    = process.env.HESABE_ACCESS_CODE   || '';
+  const appUrl    = process.env.APP_URL              || '';
+  const frontUrl  = process.env.FRONTEND_URL         || '';
+  res.json({
+    secretKey:    { length: secretKey.length, valid: secretKey.length === 32, hint: secretKey.substring(0,4)+'...' },
+    ivKey:        { length: ivKey.length,     valid: ivKey.length === 16,     hint: ivKey.substring(0,4)+'...' },
+    merchantCode: { set: !!merchant,   length: merchant.length },
+    accessCode:   { set: !!access,     length: access.length   },
+    APP_URL:      { value: appUrl,     isPlaceholder: appUrl.includes('your-api') },
+    FRONTEND_URL: { value: frontUrl,   isPlaceholder: frontUrl.includes('your-frontend') },
+    hesabe_env:   process.env.HESABE_ENV || 'not set',
+    warnings: [
+      secretKey.length !== 32 ? `SECRET_KEY must be 32 chars, got ${secretKey.length}` : null,
+      ivKey.length !== 16     ? `IV_KEY must be 16 chars, got ${ivKey.length}` : null,
+      !merchant               ? 'HESABE_MERCHANT_CODE not set' : null,
+      !access                 ? 'HESABE_ACCESS_CODE not set' : null,
+      appUrl.includes('your-api') ? 'APP_URL is still placeholder!' : null,
+      frontUrl.includes('your-frontend') ? 'FRONTEND_URL is still placeholder!' : null,
+    ].filter(Boolean),
+  });
+});
+// ── Debug: decrypt a Hesabe callback manually ──────────────────
+// POST /api/debug/decrypt-hesabe  body: { data: "hex_string" }
+app.post('/api/debug/decrypt-hesabe', (req, res) => {
+  try {
+    const { data } = req.body;
+    if (!data) return res.status(400).json({ error: 'Provide { data: "hex_string" }' });
+    const result = decryptHesabeCallback(data);
+    res.json({ success: true, decrypted: result });
+  } catch(err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 // ============================================================
 // ─── ROUTES: AUTH ────────────────────────────────────────────
 // ============================================================
@@ -662,20 +738,39 @@ app.post('/api/bookings/create', async (req, res) => {
     // Insert passengers
     const seatMap = {};
     seatsResult.rows.forEach(s => { seatMap[s.seat_number] = s.id; });
+    // Helper: safely trim and cap string length to avoid VARCHAR overflow
+    const safe = (val, maxLen) =>
+      val ? String(val).trim().substring(0, maxLen) : null;
     for (let i = 0; i < passengerData.length; i++) {
       const p    = passengerData[i];
       const sNum = seat_numbers[i];
+      // Sanitise every text field against its column size in DB
+      // (after migration: nationality=100, phone=30, first_name=100, last_name=100)
+      const firstName   = safe(p.first_name,   100);
+      const lastName    = safe(p.last_name,     100);
+      const nationality = safe(p.nationality,   100); // was VARCHAR(5) → now 100
+      const idNumber    = safe(p.id_number,      60);
+      const phone       = safe(p.phone,           30);
+      const email       = safe(p.email,          200);
+      const age         = p.age ? parseInt(p.age, 10) || null : null;
+      const gender      = p.gender || null;
+      if (!firstName) {
+        throw new Error(`Passenger ${i + 1}: first_name is required`);
+      }
       await client.query(
         `INSERT INTO passengers
            (booking_id, seat_id, is_primary, first_name, last_name,
-            age, gender, phone, email, nationality)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [booking.id, seatMap[sNum], i === 0,
-         p.first_name, p.last_name || null,
-         p.age || null, p.gender || null,
-         i === 0 ? p.phone : null,
-         i === 0 ? p.email : null,
-         p.nationality || null]
+            age, gender, phone, email, nationality, id_number)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [
+          booking.id, seatMap[sNum], i === 0,
+          firstName, lastName,
+          age, gender,
+          i === 0 ? phone : null,
+          i === 0 ? email : null,
+          nationality,
+          idNumber,
+        ]
       );
     }
     await client.query('COMMIT');
@@ -793,6 +888,49 @@ app.post('/api/payments/hesabe/initiate', async (req, res) => {
     sendError(res, 500, 'Payment initiation failed', err.message);
   }
 });
+// ─────────────────────────────────────────────────────────────
+// HESABE CALLBACK HELPER
+// Hesabe wraps the payment result in a nested structure.
+// The callback ?data= is a hex-encrypted string whose decrypted
+// value is either:
+//   A) { status, code, message, response: { data: { resultCode, ... } } }
+//   B) { resultCode, amount, paymentId, variable1, ... }  (flat)
+// We must handle both shapes.
+// ─────────────────────────────────────────────────────────────
+function decryptHesabeCallback(raw) {
+  if (!raw) return null;
+  // Express may have already decoded the query string once.
+  // Try decoding again in case Hesabe double-encoded it.
+  let hexStr = raw;
+  if (hexStr.includes('%')) {
+    try { hexStr = decodeURIComponent(hexStr); } catch(_) {}
+  }
+  let decrypted;
+  try {
+    decrypted = hesabeCrypt.decrypt(hexStr);
+  } catch (e) {
+    console.error('Hesabe decrypt failed:', e.message);
+    console.error('Raw data (first 80 chars):', String(raw).substring(0, 80));
+    return null;
+  }
+  // Log full decrypted structure so we can debug future issues
+  console.log(' Hesabe decrypted payload:', JSON.stringify(decrypted, null, 2));
+  // Shape A: nested under response.data
+  if (decrypted?.response?.data && typeof decrypted.response.data === 'object') {
+    return decrypted.response.data;
+  }
+  // Shape B: flat object directly
+  if (decrypted?.resultCode || decrypted?.variable1 || decrypted?.orderReferenceNumber) {
+    return decrypted;
+  }
+  // Shape C: status wrapper without nested data
+  if (decrypted?.status !== undefined) {
+    console.warn('Hesabe returned status wrapper without payment data:', decrypted);
+  }
+    return decrypted;
+  console.warn('Unknown Hesabe response shape:', decrypted);
+  return decrypted;
+}
 // Step 2: Success callback — Hesabe redirects here after payment
 // Handles both GET and POST (Hesabe may use either)
 async function handleHesabeSuccess(req, res) {
@@ -809,20 +947,35 @@ async function handleHesabeSuccess(req, res) {
     const raw = req.query.data || req.body?.data;
     if (!raw) {
       console.warn('Hesabe success callback called with no data param');
+      console.warn('Query params:', req.query);
+      console.warn('Body keys:', Object.keys(req.body || {}));
       return res.redirect(302, `${FRONTEND}?payment-failed=1&reason=no_data`);
     }
-    const decrypted = hesabeCrypt.decrypt(decodeURIComponent(raw));
-    const { resultCode, amount, paymentId, paymentToken, orderReferenceNumber, variable1, method } = decrypted;
-    bookingRef      = variable1 || orderReferenceNumber;
-    const isSuccess = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(resultCode);
-    console.log(` Hesabe success callback: ref=${bookingRef} code=${resultCode} amount=${amount}`);
-    // Log to DB (don't throw if this fails)
+    const payload = decryptHesabeCallback(raw);
+    if (!payload) {
+      console.error('Could not decrypt Hesabe callback data');
+      return res.redirect(302, `${FRONTEND}?payment-failed=1&reason=decrypt_error`);
+    }
+    // Extract fields — support both camelCase and snake_case
+    const resultCode  = payload.resultCode   || payload.result_code;
+    const amount      = payload.amount;
+    const paymentId   = payload.paymentId    || payload.payment_id;
+    const paymentToken= payload.paymentToken || payload.payment_token;
+    const method      = payload.method;
+    const orderRef    = payload.orderReferenceNumber || payload.order_reference_number;
+    // booking ref is in variable1 (set by us during initiate) or orderReferenceNumber
+    bookingRef = payload.variable1 || orderRef;
+    const isSuccess = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(String(resultCode).toUpperCase());
+    console.log(`
+    // Log to DB
+ Hesabe success callback: ref=${bookingRef} code=${resultCode} amount=${amount} success=${isSuccess}`);
     await db.query(
       `INSERT INTO payment_webhook_log
          (booking_ref, raw_payload, decrypted_data, result_code, payment_id, amount, processed)
        VALUES ($1,$2,$3::JSONB,$4,$5,$6,$7)`,
-      [bookingRef, raw, JSON.stringify(decrypted), resultCode, paymentId, amount, isSuccess]
-    ).catch(e => console.error('Log failed:', e.message));
+      [bookingRef, String(raw).substring(0, 500), JSON.stringify(payload),
+       resultCode, paymentId, amount, isSuccess]
+    ).catch(e => console.error('Webhook log failed:', e.message));
     if (isSuccess) {
       await confirmPayment(bookingRef, paymentId, paymentToken, resultCode, method, amount);
       const successUrl = `${FRONTEND}?booking-confirmed=1&ref=${encodeURIComponent(bookingRef)}&paid=${amount}&method=${method || ''}`;
@@ -831,9 +984,11 @@ async function handleHesabeSuccess(req, res) {
     } else {
       await db.query(
         `UPDATE bookings SET payment_status='FAILED', updated_at=NOW() WHERE booking_ref=$1`,
-        [bookingRef]
+        [bookingRef || '']
       ).catch(() => {});
-      const failUrl = `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}&reason=${resultCode}`;
+      const failUrl = bookingRef
+        ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}&reason=${resultCode}`
+        : `${FRONTEND}?payment-failed=1&reason=${resultCode}`;
       return res.redirect(302, failUrl);
     }
   } catch (err) {
@@ -848,46 +1003,48 @@ app.get('/api/payments/hesabe/success',  handleHesabeSuccess);
 app.post('/api/payments/hesabe/success', handleHesabeSuccess);
 // Step 3: Failure callback
 // Hesabe may call this as GET or POST — handle both
-// URL: /api/payments/hesabe/failure?data=ENCRYPTED
 async function handleHesabeFailure(req, res) {
   const FRONTEND = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
   let bookingRef = null;
-  // Safety: if FRONTEND_URL is not set, log clearly
   if (!FRONTEND) {
     console.error(' FRONTEND_URL is not set — cannot redirect passenger after failure');
     return res.status(500).send(
       'Payment gateway callback error: FRONTEND_URL not configured on server. ' +
-      'Please contact support. Your payment was NOT charged.'
+      'Your payment was NOT charged. Please contact support.'
     );
   }
   try {
-    // data may arrive in query string (GET) or request body (POST)
     const raw = req.query.data || req.body?.data;
     if (raw) {
-      const decrypted = hesabeCrypt.decrypt(decodeURIComponent(raw));
-      bookingRef = decrypted.variable1 || decrypted.orderReferenceNumber;
-      console.log(` Hesabe failure: ref=${bookingRef} code=${decrypted.resultCode}`);
-      // Log to DB
-      await db.query(
-        `INSERT INTO payment_webhook_log
-           (booking_ref, raw_payload, decrypted_data, result_code, processed)
-         VALUES ($1,$2,$3::JSONB,$4,FALSE)
-         ON CONFLICT DO NOTHING`,
-        [bookingRef, raw, JSON.stringify(decrypted), decrypted.resultCode || 'FAILED']
-      ).catch(() => {}); // don't throw if log fails
-      if (bookingRef) {
+      const payload = decryptHesabeCallback(raw);
+      if (payload) {
+        const resultCode = payload.resultCode || payload.result_code || 'FAILED';
+        bookingRef = payload.variable1 || payload.orderReferenceNumber || payload.order_reference_number;
+        console.log(` Hesabe failure: ref=${bookingRef} code=${resultCode}`);
         await db.query(
-          `UPDATE bookings
-           SET payment_status = 'FAILED', updated_at = NOW()
-           WHERE booking_ref = $1 AND payment_status = 'PENDING'`,
-          [bookingRef]
+          `INSERT INTO payment_webhook_log
+             (booking_ref, raw_payload, decrypted_data, result_code, processed)
+           VALUES ($1,$2,$3::JSONB,$4,FALSE)`,
+          [bookingRef, String(raw).substring(0, 500), JSON.stringify(payload), resultCode]
         ).catch(() => {});
+        if (bookingRef) {
+          await db.query(
+            `UPDATE bookings
+             SET payment_status = 'FAILED', updated_at = NOW()
+             WHERE booking_ref = $1 AND payment_status = 'PENDING'`,
+            [bookingRef]
+          ).catch(() => {});
+        }
       }
+    } else {
+      // No data param — Hesabe called failure URL without payload
+      console.warn('Hesabe failure callback: no data param');
+      console.warn('Query:', JSON.stringify(req.query));
+      console.warn('Body:', JSON.stringify(req.body));
     }
   } catch (err) {
-    console.error('Failure callback decrypt error:', err.message);
+    console.error('Failure callback error:', err.message);
   }
-  // Redirect passenger back to frontend failure page
   const redirectTo = bookingRef
     ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}`
     : `${FRONTEND}?payment-failed=1`;
@@ -901,32 +1058,37 @@ app.post('/api/payments/hesabe/failure', handleHesabeFailure);
 app.post('/api/payments/hesabe/webhook', async (req, res) => {
   let bookingRef = null;
   try {
-    const body    = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-    const parsed  = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    // Webhook body may be raw string or parsed JSON
+    const rawStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const parsed = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { data } = parsed;
-    if (!data) return res.status(400).json({ error: 'No data in webhook' });
-    const decrypted = hesabeCrypt.decrypt(data);
-    const {
-      resultCode,
-      amount,
-      paymentId,
-      paymentToken,
-      paidOn,
-      orderReferenceNumber,
-      variable1,
-      method,
-    } = decrypted;
-    bookingRef        = variable1 || orderReferenceNumber;
-    const isSuccess   = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(resultCode);
-    console.log(`
-    // Log raw
- Hesabe Webhook: ${resultCode} | ${bookingRef} | KWD ${amount}`);
+    if (!data) {
+      console.error('Hesabe webhook: no data field in body. Body keys:', Object.keys(parsed));
+      return res.status(400).json({ error: 'No data in webhook body' });
+    }
+    // Use shared decryptHesabeCallback which handles all response shapes
+    const payload = decryptHesabeCallback(data);
+    if (!payload) {
+      console.error('Hesabe webhook: could not decrypt payload');
+      return res.status(400).json({ error: 'Could not decrypt webhook payload' });
+    }
+    const resultCode  = payload.resultCode   || payload.result_code;
+    const amount      = payload.amount;
+    const paymentId   = payload.paymentId    || payload.payment_id;
+    const paymentToken= payload.paymentToken || payload.payment_token;
+    const method      = payload.method;
+    const orderRef    = payload.orderReferenceNumber || payload.order_reference_number;
+    bookingRef      = payload.variable1 || orderRef;
+    const isSuccess = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(String(resultCode).toUpperCase());
+    console.log(` Hesabe Webhook: ${resultCode} | ref=${bookingRef} | KWD ${amount} | success=${isSuccess}`);
+    // Log webhook
     await db.query(
       `INSERT INTO payment_webhook_log
          (booking_ref, raw_payload, decrypted_data, result_code, payment_id, amount, processed)
        VALUES ($1,$2,$3::JSONB,$4,$5,$6,$7)`,
-      [bookingRef, body, JSON.stringify(decrypted), resultCode, paymentId, amount, isSuccess]
-    );
+      [bookingRef, rawStr.substring(0, 500), JSON.stringify(payload),
+       resultCode, paymentId, amount, isSuccess]
+    ).catch(e => console.error('Webhook log failed:', e.message));
     if (isSuccess) {
       // Idempotency — skip if already processed
       const existing = await db.query(
@@ -941,8 +1103,8 @@ app.post('/api/payments/hesabe/webhook', async (req, res) => {
     } else {
       await db.query(
         `UPDATE bookings SET payment_status='FAILED', updated_at=NOW() WHERE booking_ref=$1`,
-        [bookingRef]
-      );
+        [bookingRef || '']
+      ).catch(() => {});
     }
     res.json({ status: 'ok' });
   } catch (err) {
@@ -1085,8 +1247,8 @@ app.get('/api/admin/schedules', requireAdmin, async (req, res) => {
        LEFT JOIN seats st ON st.schedule_id = s.id
        GROUP BY s.id, b.operator_name, b.bus_type, r.origin_city, r.destination_city
        ORDER BY s.departure_time DESC
-       LIMIT 100`
     );
+       LIMIT 100`
     res.json({ success: true, schedules: result.rows });
   } catch (err) { sendError(res, 500, 'Could not fetch schedules', err.message); }
 });
@@ -1126,8 +1288,8 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
       await client.query(
         `INSERT INTO seats (schedule_id, seat_number, seat_type, price) VALUES ($1,$2,$3,$4)`,
         [schedule.id, sNum, sType, formatKWD(base_fare)]
-      );
     }
+      );
     await client.query('COMMIT');
     res.status(201).json({ success: true, schedule, seats_created: total_seats });
   } catch (err) {
