@@ -1289,8 +1289,8 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
       await client.query(
         `INSERT INTO seats (schedule_id, seat_number, seat_type, price) VALUES ($1,$2,$3,$4)`,
         [schedule.id, sNum, sType, formatKWD(base_fare)]
-    }
       );
+	 }
     await client.query('COMMIT');
     res.status(201).json({ success: true, schedule, seats_created: total_seats });
   } catch (err) {
