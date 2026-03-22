@@ -35,6 +35,7 @@ const twilio        = require('twilio');
 const HesabeCrypt   = require('./hesabeCrypt');
 // ─── App init ────────────────────────────────────────────────
 const app  = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 // ── Startup: validate critical environment variables ──────────
 // If APP_URL is wrong, Hesabe callbacks go to "Not Found".
