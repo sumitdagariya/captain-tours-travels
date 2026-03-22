@@ -1069,7 +1069,7 @@ async function handleHesabeFailure(req, res) {
   } catch (err) {
     console.error('Failure callback error:', err.message);
   }
-  const redirectTo = bookingRef
+  const redirectTo = payload.variable1
     ? `${FRONTEND}?payment-failed=1&ref=${encodeURIComponent(bookingRef)}`
     : `${FRONTEND}?payment-failed=1`;
   console.log(`  Redirecting to: ${redirectTo}`);
