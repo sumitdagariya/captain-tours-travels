@@ -41,38 +41,45 @@ const PORT = process.env.PORT || 3000;
 // Check Railway → Variables and set these correctly.
 (function validateEnv() {
   const missing = [];
-  ['DATABASE_URL', 'JWT_SECRET'].forEach(k => {
+
+  ['DATABASE_URL', 'JWT_SECRET'].forEach((k) => {
     if (!process.env[k]) missing.push(k);
   });
+
+  // ✅ Fix: proper block
   if (missing.length) {
-  }
-    console.error(' FATAL: Missing env vars:', missing.join(', '));
+    console.error('❌ FATAL: Missing env vars:', missing.join(', '));
     process.exit(1);
+  }
+
   const APP_URL = (process.env.APP_URL || '').trim();
+
   if (!APP_URL) {
     console.error(
-      ' CRITICAL: APP_URL is not set in Railway environment variables!\n' +
+      '❌ CRITICAL: APP_URL is not set in Railway environment variables!\n' +
       '   Hesabe will redirect to undefined/null which causes "Not Found".\n' +
       '   Fix: Railway Dashboard → Your Project → Variables → Add APP_URL\n' +
       '   Value: https://YOUR-REAL-APP-NAME.up.railway.app'
     );
   } else if (APP_URL.includes('your-api.railway.app')) {
     console.error(
-      ' CRITICAL: APP_URL is still the placeholder "your-api.railway.app"!\n' +
+      '❌ CRITICAL: APP_URL is still the placeholder "your-api.railway.app"!\n' +
       '   This is NOT a real domain. Hesabe callbacks will show "Not Found".\n' +
       '   Fix: Railway Dashboard → Variables → APP_URL → paste your real URL.\n' +
-      '   Your real Railway URL looks like: https://routeride-production.up.railway.app'
+      '   Example: https://routeride-production.up.railway.app'
     );
   } else {
-    console.log(' APP_URL:', APP_URL);
+    console.log('✅ APP_URL:', APP_URL);
   }
+
   const FRONTEND_URL = (process.env.FRONTEND_URL || '').trim();
+
   if (!FRONTEND_URL) {
-    console.warn('  FRONTEND_URL not set — payment redirects will fail');
+    console.warn('⚠️ FRONTEND_URL not set — payment redirects may fail');
   } else if (FRONTEND_URL.includes('your-frontend.vercel.app')) {
-    console.warn('  FRONTEND_URL is still the placeholder — update it in Railway Variables');
+    console.warn('⚠️ FRONTEND_URL is still the placeholder — update it in Railway Variables');
   } else {
-    console.log(' FRONTEND_URL:', FRONTEND_URL);
+    console.log('✅ FRONTEND_URL:', FRONTEND_URL);
   }
 })();
 // ─── Database (PostgreSQL via Supabase / Railway) ─────────────
