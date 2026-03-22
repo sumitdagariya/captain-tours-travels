@@ -42,8 +42,7 @@ const PORT = process.env.PORT || 3000;
 // Check Railway → Variables and set these correctly.
 (function validateEnv() {
   const missing = [];
-
-  ['DATABASE_URL', 'JWT_SECRET'].forEach((k) => {
+  ['DATABASE_URL', 'JWT_SECRET'].forEach(k => {
     if (!process.env[k]) missing.push(k);
   });
 
@@ -52,9 +51,7 @@ const PORT = process.env.PORT || 3000;
     console.error('❌ FATAL: Missing env vars:', missing.join(', '));
     process.exit(1);
   }
-
   const APP_URL = (process.env.APP_URL || '').trim();
-
   if (!APP_URL) {
     console.error(
       '❌ CRITICAL: APP_URL is not set in Railway environment variables!\n' +
@@ -72,9 +69,7 @@ const PORT = process.env.PORT || 3000;
   } else {
     console.log('✅ APP_URL:', APP_URL);
   }
-
   const FRONTEND_URL = (process.env.FRONTEND_URL || '').trim();
-
   if (!FRONTEND_URL) {
     console.warn('⚠️ FRONTEND_URL not set — payment redirects may fail');
   } else if (FRONTEND_URL.includes('your-frontend.vercel.app')) {
@@ -867,15 +862,26 @@ app.post('/api/payments/hesabe/initiate', async (req, res) => {
         timeout: 15000,
       }
     );
-    // Decrypt Hesabe's response
-    const rawResponse     = response.data?.response || response.data;
-    const decryptedResponse = hesabeCrypt.decrypt(
-      typeof rawResponse === 'string' ? rawResponse : JSON.stringify(rawResponse)
-    );
-    if (!decryptedResponse?.response?.data)
-      throw new Error('Invalid response from Hesabe checkout');
-    const paymentToken  = decryptedResponse.response.data;
-    const redirectUrl   = `${HESABE_PAYMENT_URL}?data=${paymentToken}`;
+    // Decrypt Hesabe's checkout response
+    // Hesabe checkout API returns: { response: "hex_encrypted_string" }
+    // The hex string decrypts to: { status, code, response: { data: "payment_token" } }
+    const encryptedHex = response.data?.response;
+    if (!encryptedHex || typeof encryptedHex !== 'string') {
+      console.error('Hesabe checkout raw response:', JSON.stringify(response.data));
+      throw new Error('Hesabe checkout returned unexpected structure — no response field');
+    }
+    const decryptedCheckout = hesabeCrypt.decrypt(encryptedHex);
+    console.log('Hesabe checkout decrypted:', JSON.stringify(decryptedCheckout, null, 2));
+    // The payment token to redirect user to Hesabe payment page
+    // It lives in decryptedCheckout.response.data (string token)
+    const paymentToken =
+      decryptedCheckout?.response?.data ||   // standard shape
+      decryptedCheckout?.data           ||   // fallback
+      decryptedCheckout?.response;           // last resort
+    if (!paymentToken || typeof paymentToken !== 'string') {
+      throw new Error('Could not extract payment token from Hesabe checkout response');
+    }
+    const redirectUrl = `${HESABE_PAYMENT_URL}?data=${paymentToken}`;
     // Save the payment token against the booking
     await db.query(
       `UPDATE bookings
@@ -898,19 +904,26 @@ app.post('/api/payments/hesabe/initiate', async (req, res) => {
 });
 // ─────────────────────────────────────────────────────────────
 // HESABE CALLBACK HELPER
-// Hesabe wraps the payment result in a nested structure.
-// The callback ?data= is a hex-encrypted string whose decrypted
-// value is either:
-//   A) { status, code, message, response: { data: { resultCode, ... } } }
-//   B) { resultCode, amount, paymentId, variable1, ... }  (flat)
-// We must handle both shapes.
+//
+// CONFIRMED Hesabe structure (from live Railway logs 2026-03-22):
+// {
+//   status: false, code: 0, message: "Transaction Failed",
+//   response: {
+//     resultCode: "FAILURE",        <- result here, NOT in response.data
+//     variable1: "RR-2026-45031",   <- our booking ref
+//     amount: "52.500",
+//     paymentToken: "...",
+//     paymentId: "0",
+//     orderReferenceNumber: "RR-2026-45031",
+//     customer: { Name, Email, Mobile }
+//   }
+// }
 // ─────────────────────────────────────────────────────────────
 function decryptHesabeCallback(raw) {
   if (!raw) return null;
-  // Express may have already decoded the query string once.
-  // Try decoding again in case Hesabe double-encoded it.
+  // Handle potential double URL-encoding
   let hexStr = raw;
-  if (hexStr.includes('%')) {
+  if (typeof hexStr === 'string' && hexStr.includes('%')) {
     try { hexStr = decodeURIComponent(hexStr); } catch(_) {}
   }
   let decrypted;
@@ -918,25 +931,40 @@ function decryptHesabeCallback(raw) {
     decrypted = hesabeCrypt.decrypt(hexStr);
   } catch (e) {
     console.error('Hesabe decrypt failed:', e.message);
-    console.error('Raw data (first 80 chars):', String(raw).substring(0, 80));
+  }
+    console.error('Raw (first 100):', String(raw).substring(0, 100));
     return null;
+  console.log('Hesabe decrypted payload:', JSON.stringify(decrypted, null, 2));
+  // SHAPE 1 (confirmed from live logs):
+  // { status, code, message, response: { resultCode, variable1, ... } }
+  // NOTE: payment fields are in response directly — NOT in response.data
+  if (
+    decrypted &&
+    decrypted.response &&
+    typeof decrypted.response === 'object' &&
+    !Array.isArray(decrypted.response) &&
+    (decrypted.response.resultCode ||
+     decrypted.response.variable1  ||
+     decrypted.response.orderReferenceNumber)
+  ) {
+    // Flatten: merge response fields up to top level for easy access
+    return {
+      ...decrypted.response,
+      _status:  decrypted.status,
+      _code:    decrypted.code,
+      _message: decrypted.message,
+    };
   }
-  // Log full decrypted structure so we can debug future issues
-  console.log(' Hesabe decrypted payload:', JSON.stringify(decrypted, null, 2));
-  // Shape A: nested under response.data
-  if (decrypted?.response?.data && typeof decrypted.response.data === 'object') {
-    return decrypted.response.data;
-  }
-  // Shape B: flat object directly
-  if (decrypted?.resultCode || decrypted?.variable1 || decrypted?.orderReferenceNumber) {
+  // SHAPE 2: flat object { resultCode, variable1, amount, ... } with no wrapper
+  if (decrypted && (decrypted.resultCode || decrypted.variable1 || decrypted.orderReferenceNumber)) {
     return decrypted;
   }
-  // Shape C: status wrapper without nested data
-  if (decrypted?.status !== undefined) {
-    console.warn('Hesabe returned status wrapper without payment data:', decrypted);
-  }
+  // SHAPE 3: checkout initiate response { status, response: { data: "token_string" } }
+  // This comes from /checkout only, not from payment callbacks
+  if (decrypted && decrypted.response && typeof decrypted.response.data === 'string') {
     return decrypted;
-  console.warn('Unknown Hesabe response shape:', decrypted);
+  }
+  console.warn('Unknown Hesabe response shape:', JSON.stringify(decrypted));
   return decrypted;
 }
 // Step 2: Success callback — Hesabe redirects here after payment
@@ -974,9 +1002,8 @@ async function handleHesabeSuccess(req, res) {
     // booking ref is in variable1 (set by us during initiate) or orderReferenceNumber
     bookingRef = payload.variable1 || orderRef;
     const isSuccess = ['CAPTURED', 'ACCEPT', 'SUCCESS'].includes(String(resultCode).toUpperCase());
-    console.log(`
+    console.log(` Hesabe success callback: ref=${bookingRef} code=${resultCode} amount=${amount} success=${isSuccess}`);
     // Log to DB
- Hesabe success callback: ref=${bookingRef} code=${resultCode} amount=${amount} success=${isSuccess}`);
     await db.query(
       `INSERT INTO payment_webhook_log
          (booking_ref, raw_payload, decrypted_data, result_code, payment_id, amount, processed)
@@ -1027,7 +1054,7 @@ async function handleHesabeFailure(req, res) {
       const payload = decryptHesabeCallback(raw);
       if (payload) {
         const resultCode = payload.resultCode || payload.result_code || 'FAILED';
-        bookingRef = payload.variable1 || payload.variable1 || payload.variable1;
+        bookingRef = payload.variable1 || payload.orderReferenceNumber || payload.order_reference_number;
         console.log(` Hesabe failure: ref=${bookingRef} code=${resultCode}`);
         await db.query(
           `INSERT INTO payment_webhook_log
@@ -1255,9 +1282,8 @@ app.get('/api/admin/schedules', requireAdmin, async (req, res) => {
        LEFT JOIN seats st ON st.schedule_id = s.id
        GROUP BY s.id, b.operator_name, b.bus_type, r.origin_city, r.destination_city
        ORDER BY s.departure_time DESC
-	   LIMIT 100`
+       LIMIT 100`
     );
-       
     res.json({ success: true, schedules: result.rows });
   } catch (err) { sendError(res, 500, 'Could not fetch schedules', err.message); }
 });
@@ -1298,7 +1324,7 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
         `INSERT INTO seats (schedule_id, seat_number, seat_type, price) VALUES ($1,$2,$3,$4)`,
         [schedule.id, sNum, sType, formatKWD(base_fare)]
       );
-	 }
+    }
     await client.query('COMMIT');
     res.status(201).json({ success: true, schedule, seats_created: total_seats });
   } catch (err) {
